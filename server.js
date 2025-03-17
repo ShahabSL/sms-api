@@ -16,10 +16,12 @@ const secretKey = process.env.JWT_SECRET
 //jwt auth end
 
 
-//load SSL certificate
-// const sslKey = fs.readFileSync(path.join(__dirname, 'key.pem'));
-// const sslCert = fs.readFileSync(path.join(__dirname, 'cert.pem'));
-//end
+// SSL certificate options - using relative paths within the project
+const sslOptions = {
+  key: fs.readFileSync(path.join(__dirname, 'ssl', 'key.pem')),
+  cert: fs.readFileSync(path.join(__dirname, 'ssl', 'crt.pem')),
+  ca: fs.readFileSync(path.join(__dirname, 'ssl', 'chain.pem'))
+};
 
 //sha256
 const crypto = require('crypto');
@@ -29,6 +31,11 @@ function sha256(password) {
 }
 //sha256 end
 
+
+// Environment variables
+const VI_API_URL = process.env.VI_API_URL || 'https://api.voipinnovations.com/api3.0'; // Adjust URL as needed
+const VI_API_USERNAME = process.env.VI_API_USERNAME;
+const VI_API_PASSWORD = process.env.VI_API_PASSWORD;
 
 
 //csrf if needed
@@ -234,11 +241,161 @@ app.post('/api/BulkVS/V1/send', authenticateToken, (req, res) => {
         });
 });
     
+
+
+
+// Webhook endpoint for receiving SMS VOIP Innovations
+app.post('/api/VI/V1', (req, res) => {
+  try {
+    // Log the entire payload
+    console.log('Headers:', req.headers);
+    console.log('Query:', req.query);
+    console.log('Received webhook payload:', JSON.stringify(req.body, null, 2));
+    
+    // Extract the available information
+    const messageType = req.body.messageType || 'UNKNOWN';
+    const text = req.body.text || '';
+    
+    // Log the message
+    console.log(`Received ${messageType}: "${text}"`);
+    
+    // Check if we're missing critical information
+    if (!req.body.sender && !req.body.recipient) {
+      console.warn('Warning: Webhook payload is missing sender and recipient information');
+      
+      // Check headers for additional information
+      console.log('Request headers:', req.headers);
+      
+      // The recipient might be identifiable from the URL path or query parameters
+      console.log('Request URL:', req.originalUrl);
+      console.log('Request query parameters:', req.query);
+    }
+    
+    // Process the message with available information
+    processSmsMessageVI(messageType, text, req);
+    
+    // Respond with success
+    res.status(200).json({
+      success: true,
+      message: 'Message received and processed'
+    });
+  } catch (error) {
+    console.error('Error processing incoming webhook:', error);
+    
+    // Still return 200 to prevent retries
+    res.status(200).json({
+      success: false,
+      error: 'Failed to process the message, but received it'
+    });
+  }
+});
+
+// Function to process incoming SMS with limited information
+function processSmsMessageVI(messageType, text, req) {
+  // Extract any additional information from headers or URL
+  const to = req.query.to || 'unknown'; // Check if DID is in query parameters
+  const from = req.query.from || 'unknown'; // Check if sender is in query parameters
+  
+  // You might need to determine the recipient based on which webhook URL was hit
+  // For example, if you configure different URLs for different DIDs
+  
+  // Store in database with available information
+  // Example with MongoDB:
+  /*
+  const smsMessage = new SmsMessage({
+    messageType,
+    text,
+    to,
+    from,
+    receivedAt: new Date(),
+    headers: req.headers, // Store headers for debugging
+    query: req.query, // Store query parameters for debugging
+    path: req.path // Store path for debugging
+  });
+  await smsMessage.save();
+  */
+  
+  // Additional processing as needed
+}
+
+// Send SMS endpoint
+app.post('/api/VI/V1/send', async (req, res) => {
+  try {
+    const { from, to, message } = req.body;
+    
+    // Validate input
+    if (!from || !to || !message) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'From number, to number, and message are required' 
+      });
+    }
+    
+    // Format phone numbers if needed
+    const formattedFrom = formatPhoneNumber(from);
+    const formattedTo = formatPhoneNumber(to);
+    
+    // Call VoIP Innovations API
+    const response = await axios.post(
+      `${VI_API_URL}/SendSMS`, // Method name as endpoint
+      {
+        login: VI_API_USERNAME,
+        secret: VI_API_PASSWORD,
+        sender: formattedFrom,
+        recipient: formattedTo,
+        message: message
+      }
+    );
+    
+    // Check for API errors
+    if (response.data.responseCode !== '100') {
+      return res.status(400).json({
+        success: false,
+        error: response.data.responseMessage
+      });
+    }
+  // Return success response
+  res.status(200).json({
+    success: true,
+    message: 'SMS sent successfully',
+    response: response.data
+  });
+  
+} catch (error) {
+  console.error('Error sending SMS:', error);
+  res.status(500).json({
+    success: false,
+    error: error.response ? error.response.data : 'Failed to send SMS'
+  });
+}
+});
+
+// Helper function to format phone numbers
+function formatPhoneNumber(phoneNumber) {
+// Remove any non-digit characters
+const digitsOnly = phoneNumber.replace(/\D/g, '');
+
+// Ensure it has 10 digits (US numbers)
+if (digitsOnly.length === 10) {
+  return digitsOnly;
+}
+
+// If it already has country code (11 digits for US)
+if (digitsOnly.length === 11 && digitsOnly.startsWith('1')) {
+  return digitsOnly.substring(1); // Remove the '1' country code
+}
+
+return phoneNumber; // Return as-is if format is unclear
+}
+
+
 //mongodev
     
 
 
-  // Start the server
-app.listen(3003, () => {
-    console.log('Server is running on port 3003');
-  });
+const httpsServer = https.createServer(sslOptions, app);
+const HTTPS_PORT = process.env.HTTPS_PORT || 443;
+
+httpsServer.listen(HTTPS_PORT, () => {
+  console.log(`HTTPS server running on port ${HTTPS_PORT}`);
+});
