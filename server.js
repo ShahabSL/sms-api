@@ -319,7 +319,7 @@ function processSmsMessageVI(messageType, text, req) {
 }
 
 // Send SMS endpoint
-app.post('/api/VI/V1/send', async (req, res) => {
+app.post('/api/VI/V1/send',authenticateToken, async (req, res) => {
   try {
     const { from, to, message } = req.body;
     
