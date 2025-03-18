@@ -7,7 +7,11 @@ const axios = require('axios');
 const fs = require('fs');
 const https = require('https');
 const path = require('path');
+const xml2js = require('xml2js');
 
+// Add strong-soap for SOAP API calls
+const soap = require('strong-soap').soap;
+const { promisify } = require('util');
 
 //jwt auth
 const jwt = require('jsonwebtoken');
@@ -33,7 +37,7 @@ function sha256(password) {
 
 
 // Environment variables
-const VI_API_URL = process.env.VI_API_URL || 'https://api.voipinnovations.com/api3.0'; // Adjust URL as needed
+const VI_API_URL = process.env.VI_API_URL || 'https://backoffice.voipinnovations.com/Services/APIService.asmx'; // SOAP endpoint
 const VI_API_USERNAME = process.env.VI_API_USERNAME;
 const VI_API_PASSWORD = process.env.VI_API_PASSWORD;
 
@@ -47,6 +51,12 @@ app.use(express.static('public'));
 app.use(express.urlencoded({ extended: false }))
 // parse json
 app.use(express.json())
+
+// XML parser for handling SOAP responses
+const xmlParser = new xml2js.Parser({
+  explicitArray: false,
+  tagNameProcessors: [xml2js.processors.stripPrefix]
+});
 
 //jwt auth
 function authenticateToken(req, res, next) {
@@ -78,10 +88,8 @@ function processInboundSMS(from, to, message) {
   
 
 app.post('/api/v1/tokengen', (req, res) => {
-
     console.log('hit tokengen')
     
-
     let { username, password } = req.body;
     password = sha256(password);
     console.log(password);
@@ -90,20 +98,16 @@ app.post('/api/v1/tokengen', (req, res) => {
     // Check if the username and password are valid
     if (username === process.env.DEMO_USER && password === process.env.DEMO_PASSWORD) {
         const token = jwt.sign({ username: username }, process.env.JWT_SECRET);
-    res.json({ token});
+        res.json({ token});
     }
     else{
-        
         res.status(401).json({ success: false, error: 'unauthorized' });
-        return ;
+        return;
     }
-
 });
     
-
 //test protected
 app.get('/api/v1/protected',authenticateToken, (req, res) => {
-
     res.json({ message: `Welcome, Jane` });
 });
 
@@ -159,117 +163,135 @@ app.post('/api/BulkVS/V1', (req, res) => {
     }
   });
 
-
-
-// BulkVS SMS sending route
+// BulkVS SMS sending route with multiple recipient support
 app.post('/api/BulkVS/V1/send', authenticateToken, (req, res) => {
-    console.log('SMS send request received');
+  console.log('SMS send request received');
+  
+  const { to, message, from } = req.body;
+  
+  // Validate required fields
+  if (!to || !message) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Missing required fields: to and message are required' 
+    });
+  }
+  
+  // Validate message length
+  if (message.length > 160) {
+    return res.status(400).json({
+      success: false,
+      error: 'Message exceeds maximum length of 160 characters'
+    });
+  }
+  
+  // Convert 'to' to an array if it's not already
+  // This handles both single recipient and multiple recipients
+  const toNumbers = Array.isArray(to) ? to : [to];
+  
+  // Use from number from request or default from env
+  const fromNumber = from || process.env.BULKVS_FROM_NUMBER;
+  
+  // Prepare the request configuration
+  const config = {
+      method: 'post',
+      url: 'https://portal.bulkvs.com/api/v1.0/messageSend',
+      headers: {
+        'accept': 'application/json',
+        'Content-Type': 'application/json',
+        'Authorization': `Basic ${process.env.BULKVS_AUTH_TOKEN}`
+      },
+      data: {
+        'From': fromNumber,
+        'To': toNumbers,
+        'Message': message
+      }
+    };
     
-    const { to, message, from } = req.body;
-    
-    // Validate required fields
-    if (!to || !message) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Missing required fields: to and message are required' 
-      });
-    }
-    
-    // Validate message length
-    if (message.length > 160) {
-      return res.status(400).json({
-        success: false,
-        error: 'Message exceeds maximum length of 160 characters'
-      });
-    }
-    
-    // Format the phone number if needed
-    const toNumber = to;
-    
-    // Use from number from request or default from env
-    const fromNumber = from || process.env.BULKVS_FROM_NUMBER;
-    
-    // Prepare the request configuration
-    const config = {
-        method: 'post',
-        url: 'https://portal.bulkvs.com/api/v1.0/messageSend',
-        headers: {
-          'accept': 'application/json',
-          'Content-Type': 'application/json',
-          'Authorization': `Basic ${process.env.BULKVS_AUTH_TOKEN}`
-        },
-        data: {
-          'From': fromNumber,
-          'To': [toNumber],
-          'Message': message
-        }
-      };
-      
-      // Send the SMS
-      axios(config)
-        .then(response => {
-          console.log('SMS sent successfully:', response.data);
-          res.status(200).json({
-            success: true,
-            data: {
-              messageId: response.data.messageId || response.data.id || 'unknown',
-              status: response.data.status || 'sent',
-              to: toNumber,
-              from: fromNumber,
-              timestamp: new Date().toISOString()
-            }
-          });
-        })
-        .catch(error => {
-          console.error('Error sending SMS:', error.response ? error.response.data : error.message);
-          
-          let errorMessage = 'Failed to send SMS';
-          let statusCode = 500;
-          if (error.response) {
-            errorMessage = `BulkVS API error: ${JSON.stringify(error.response.data)}`;
-            statusCode = error.response.status;
-          } else if (error.request) {
-            errorMessage = 'No response received from BulkVS API';
-          } else {
-            errorMessage = error.message;
+    // Send the SMS
+    axios(config)
+      .then(response => {
+        console.log('SMS sent successfully:', response.data);
+        res.status(200).json({
+          success: true,
+          data: {
+            messageId: response.data.messageId || response.data.id || 'unknown',
+            status: response.data.status || 'sent',
+            to: toNumbers,
+            from: fromNumber,
+            timestamp: new Date().toISOString()
           }
-          
-          res.status(statusCode).json({
-            success: false,
-            error: errorMessage
-          });
         });
+      })
+      .catch(error => {
+        console.error('Error sending SMS:', error.response ? error.response.data : error.message);
+        
+        let errorMessage = 'Failed to send SMS';
+        let statusCode = 500;
+        if (error.response) {
+          errorMessage = `BulkVS API error: ${JSON.stringify(error.response.data)}`;
+          statusCode = error.response.status;
+        } else if (error.request) {
+          errorMessage = 'No response received from BulkVS API';
+        } else {
+          errorMessage = error.message;
+        }
+        
+        res.status(statusCode).json({
+          success: false,
+          error: errorMessage
+        });
+      });
 });
     
-
-
-
 // Webhook endpoint for receiving SMS VOIP Innovations
 app.post('/api/VI/V1', (req, res) => {
   try {
-    // Log the entire payload
+    // Log complete request details for maximum visibility
+    console.log('==== INCOMING VI WEBHOOK ====');
     console.log('Headers:', req.headers);
-    console.log('Query:', req.query);
-    console.log('Received webhook payload:', JSON.stringify(req.body, null, 2));
+    console.log('Query Parameters:', req.query);
+    console.log('Body (raw):', req.body);
+    console.log('Body (stringified):', JSON.stringify(req.body, null, 2));
+    console.log('URL:', req.originalUrl);
+    console.log('Method:', req.method);
+    console.log('IP Address:', req.ip);
+    console.log('Content-Type:', req.headers['content-type']);
     
-    // Extract the available information
+    // Log raw request data in case it's not properly parsed
+    let rawData = '';
+    if (req.rawBody) {
+      console.log('Raw Body:', req.rawBody);
+    }
+    
+    // Create a complete log record for debugging
+    const logRecord = {
+      timestamp: new Date().toISOString(),
+      headers: req.headers,
+      query: req.query,
+      body: req.body,
+      url: req.originalUrl,
+      method: req.method,
+      ip: req.ip
+    };
+    
+    // Write to a log file for persistent storage
+    try {
+      fs.appendFileSync(
+        path.join(__dirname, 'vi_webhook_logs.json'), 
+        JSON.stringify(logRecord) + '\n',
+        'utf8'
+      );
+    } catch (logError) {
+      console.error('Error writing to log file:', logError);
+    }
+    
+    // Extract the available information from whatever format they're sending
     const messageType = req.body.messageType || 'UNKNOWN';
     const text = req.body.text || '';
     
     // Log the message
     console.log(`Received ${messageType}: "${text}"`);
-    
-    // Check if we're missing critical information
-    if (!req.body.sender && !req.body.recipient) {
-      console.warn('Warning: Webhook payload is missing sender and recipient information');
-      
-      // Check headers for additional information
-      console.log('Request headers:', req.headers);
-      
-      // The recipient might be identifiable from the URL path or query parameters
-      console.log('Request URL:', req.originalUrl);
-      console.log('Request query parameters:', req.query);
-    }
     
     // Process the message with available information
     processSmsMessageVI(messageType, text, req);
@@ -296,8 +318,8 @@ function processSmsMessageVI(messageType, text, req) {
   const to = req.query.to || 'unknown'; // Check if DID is in query parameters
   const from = req.query.from || 'unknown'; // Check if sender is in query parameters
   
-  // You might need to determine the recipient based on which webhook URL was hit
-  // For example, if you configure different URLs for different DIDs
+  // Log processing attempt
+  console.log(`Processing message: Type=${messageType}, Text=${text}, To=${to}, From=${from}`);
   
   // Store in database with available information
   // Example with MongoDB:
@@ -318,9 +340,45 @@ function processSmsMessageVI(messageType, text, req) {
   // Additional processing as needed
 }
 
-// Send SMS endpoint
-app.post('/api/VI/V1/send',authenticateToken, async (req, res) => {
+// Helper function to create a SOAP 1.2 envelope for sending SMS
+// ... existing code ...
+
+// Update createSoapEnvelope function
+function createSoapEnvelope(login, secret, sender, recipient, message) {
+  // Use encodeURIComponent for better handling of special characters
+  const escapeXml = (unsafe) => {
+    // First encode special characters
+    const encoded = unsafe.toString()
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+    return encoded;
+  };
+  
+  // Log the escaped values for debugging
+  console.log('Escaped secret:', escapeXml(secret));
+  
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <SendSMS xmlns="http://tempuri.org/">
+      <login>${escapeXml(login)}</login>
+      <secret>${escapeXml(secret)}</secret>
+      <sender>${escapeXml(sender)}</sender>
+      <recipient>${escapeXml(recipient)}</recipient>
+      <message>${escapeXml(message)}</message>
+    </SendSMS>
+  </soap12:Body>
+</soap12:Envelope>`;
+}
+
+// Updated Send SMS endpoint using SOAP 1.2
+app.post('/api/VI/V1/send', authenticateToken, async (req, res) => {
   try {
+    console.log('VI SMS send request received');
+    
     const { from, to, message } = req.body;
     
     // Validate input
@@ -335,63 +393,238 @@ app.post('/api/VI/V1/send',authenticateToken, async (req, res) => {
     const formattedFrom = formatPhoneNumber(from);
     const formattedTo = formatPhoneNumber(to);
     
-    // Call VoIP Innovations API
-    const response = await axios.post(
-      `${VI_API_URL}/SendSMS`, // Method name as endpoint
-      {
+    // Create SOAP 1.2 envelope
+    const soapEnvelope = createSoapEnvelope(
+      VI_API_USERNAME,
+      VI_API_PASSWORD,
+      formattedFrom,
+      formattedTo,
+      message
+    );
+    
+    console.log('Sending SOAP request to:', VI_API_URL);
+    console.log('SOAP Envelope:', soapEnvelope);
+    
+    // Make SOAP request using axios
+    const response = await axios.post(VI_API_URL, soapEnvelope, {
+      headers: {
+        'Content-Type': 'application/soap+xml; charset=utf-8',
+        'Content-Length': Buffer.byteLength(soapEnvelope)
+      }
+    });
+    
+    console.log('Got response with status:', response.status);
+    
+    // Parse XML response
+    const xmlResponse = response.data;
+    console.log('Raw SOAP Response:', xmlResponse);
+    
+    // Parse the XML
+    const parseXml = promisify(xmlParser.parseString);
+    const parsedResponse = await parseXml(xmlResponse);
+    console.log('Parsed SOAP Response:', JSON.stringify(parsedResponse, null, 2));
+    
+    // Extract response details
+    let responseCode, responseMessage, msgDetails;
+    
+    try {
+      // Navigate through the parsed XML to find the relevant data
+      // This path might need adjustment based on actual response structure
+      responseCode = parsedResponse.Envelope.Body.SendSMSResponse.SendSMSResult.responseCode;
+      responseMessage = parsedResponse.Envelope.Body.SendSMSResponse.SendSMSResult.responseMessage;
+      msgDetails = parsedResponse.Envelope.Body.SendSMSResponse.SendSMSResult.MsgDetails;
+    } catch (e) {
+      console.error('Error extracting data from SOAP response:', e);
+      return res.status(500).json({
+        success: false,
+        error: 'Error parsing SOAP response',
+        raw: xmlResponse
+      });
+    }
+    
+    // Check for API errors
+    if (responseCode !== '100') {
+      return res.status(400).json({
+        success: false,
+        error: responseMessage || 'Unknown API error',
+        code: responseCode
+      });
+    }
+    
+    // Return success response
+    res.status(200).json({
+      success: true,
+      message: 'SMS sent successfully',
+      details: {
+        responseCode,
+        responseMessage,
+        uuid: msgDetails?.uuid || '',
+        status: msgDetails?.status || ''
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error sending SMS:', error);
+    
+    let errorMessage = 'Failed to send SMS';
+    let errorDetails = {};
+    
+    if (error.response) {
+      console.error('API Error Response:', error.response.data);
+      errorMessage = 'API Error';
+      errorDetails = {
+        status: error.response.status,
+        data: error.response.data
+      };
+    } else if (error.request) {
+      console.error('No response received from API');
+      errorMessage = 'No response from API';
+      errorDetails = {
+        request: error.request.method + ' ' + error.request.path
+      };
+    } else {
+      console.error('Request error:', error.message);
+      errorMessage = error.message;
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: errorMessage,
+      details: errorDetails
+    });
+  }
+});
+
+// Alternative SendSMS implementation using strong-soap library
+// This can be used instead of the axios implementation above
+app.post('/api/VI/V1/send-alt', authenticateToken, async (req, res) => {
+  try {
+    console.log('VI SMS send request received (using soap library)');
+    
+    const { from, to, message } = req.body;
+    
+    // Validate input
+    if (!from || !to || !message) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'From number, to number, and message are required' 
+      });
+    }
+    
+    // Format phone numbers if needed
+    const formattedFrom = formatPhoneNumber(from);
+    const formattedTo = formatPhoneNumber(to);
+
+    // URL for the WSDL file
+    const wsdlUrl = `${VI_API_URL}?WSDL`;
+    console.log('Using WSDL URL:', wsdlUrl);
+    
+    // Create SOAP client
+    soap.createClient(wsdlUrl, {}, function(err, client) {
+      if (err) {
+        console.error('Error creating SOAP client:', err);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to create SOAP client',
+          details: err.message
+        });
+      }
+      
+      console.log('SOAP client created successfully');
+      
+      // Prepare parameters for SendSMS operation
+      const params = {
         login: VI_API_USERNAME,
         secret: VI_API_PASSWORD,
         sender: formattedFrom,
         recipient: formattedTo,
         message: message
-      }
-    );
-    
-    // Check for API errors
-    if (response.data.responseCode !== '100') {
-      return res.status(400).json({
-        success: false,
-        error: response.data.responseMessage
+      };
+      
+      console.log('Calling SendSMS with params:', params);
+      
+      // Call the SendSMS method
+      client.SendSMS(params, function(err, result) {
+        if (err) {
+          console.error('SOAP call error:', err);
+          return res.status(500).json({
+            success: false,
+            error: 'SOAP call failed',
+            details: err.message
+          });
+        }
+        
+        console.log('SOAP Result:', JSON.stringify(result, null, 2));
+        
+        // Extract response details
+        const response = result.SendSMSResult;
+        
+        if (response.responseCode !== '100') {
+          return res.status(400).json({
+            success: false,
+            error: response.responseMessage || 'Unknown API error',
+            code: response.responseCode
+          });
+        }
+        
+        // Return success response
+        res.status(200).json({
+          success: true,
+          message: 'SMS sent successfully',
+          details: {
+            responseCode: response.responseCode,
+            responseMessage: response.responseMessage,
+            uuid: response.MsgDetails?.uuid || '',
+            status: response.MsgDetails?.status || ''
+          }
+        });
       });
-    }
-  // Return success response
-  res.status(200).json({
-    success: true,
-    message: 'SMS sent successfully',
-    response: response.data
-  });
-  
-} catch (error) {
-  console.error('Error sending SMS:', error);
-  res.status(500).json({
-    success: false,
-    error: error.response ? error.response.data : 'Failed to send SMS'
-  });
-}
+    });
+    
+  } catch (error) {
+    console.error('Error in SOAP library implementation:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
 });
 
 // Helper function to format phone numbers
 function formatPhoneNumber(phoneNumber) {
-// Remove any non-digit characters
-const digitsOnly = phoneNumber.replace(/\D/g, '');
+  // Remove any non-digit characters
+  const digitsOnly = phoneNumber.replace(/\D/g, '');
 
-// Ensure it has 10 digits (US numbers)
-if (digitsOnly.length === 10) {
-  return digitsOnly;
+  // Ensure it has 10 digits (US numbers)
+  if (digitsOnly.length === 10) {
+    return digitsOnly;
+  }
+
+  // If it already has country code (11 digits for US)
+  if (digitsOnly.length === 11 && digitsOnly.startsWith('1')) {
+    return digitsOnly.substring(1); // Remove the '1' country code
+  }
+
+  return phoneNumber; // Return as-is if format is unclear
 }
 
-// If it already has country code (11 digits for US)
-if (digitsOnly.length === 11 && digitsOnly.startsWith('1')) {
-  return digitsOnly.substring(1); // Remove the '1' country code
-}
-
-return phoneNumber; // Return as-is if format is unclear
-}
-
-
-//mongodev
+// Raw body parser middleware for better debugging
+app.use((req, res, next) => {
+  if (req.originalUrl === '/api/VI/V1') {
+    let data = '';
+    req.on('data', chunk => {
+      data += chunk;
+    });
     
-
+    req.on('end', () => {
+      req.rawBody = data;
+      next();
+    });
+  } else {
+    next();
+  }
+});
 
 const httpsServer = https.createServer(sslOptions, app);
 const HTTPS_PORT = process.env.HTTPS_PORT || 443;
