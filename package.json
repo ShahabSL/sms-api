@@ -2,14 +2,23 @@
   "name": "jazzb-sms-api",
   "version": "1.0.0",
   "description": "A robust, scalable Express.js API that serves as a unified gateway for sending and receiving SMS messages through multiple service providers. This API abstracts away the complexities of different SMS provider integrations, offering a consistent interface while maintaining the flexibility to switch between providers seamlessly.",
-  "main": "index.js",
+  "main": "src/server.js",
   "directories": {
     "test": "tests"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "jest",
+    "lint": "eslint src/",
+    "debug": "node --inspect src/server.js"
   },
-  "keywords": [],
+  "keywords": [
+    "sms",
+    "api",
+    "express",
+    "messaging"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
@@ -26,5 +35,8 @@
     "jest": "^29.7.0",
     "nodemon": "^3.1.9",
     "supertest": "^7.0.0"
+  },
+  "engines": {
+    "node": ">=14.0.0"
   }
 }

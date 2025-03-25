@@ -13,6 +13,9 @@ const xml2js = require('xml2js');
 const soap = require('strong-soap').soap;
 const { promisify } = require('util');
 
+//trust proxy headers
+app.set('trust proxy', true);
+
 //jwt auth
 const jwt = require('jsonwebtoken');
 const secretKey = process.env.JWT_SECRET
@@ -21,11 +24,11 @@ const secretKey = process.env.JWT_SECRET
 
 
 // SSL certificate options - using relative paths within the project
-const sslOptions = {
-  key: fs.readFileSync(path.join(__dirname, 'ssl', 'key.pem')),
-  cert: fs.readFileSync(path.join(__dirname, 'ssl', 'crt.pem')),
-  ca: fs.readFileSync(path.join(__dirname, 'ssl', 'chain.pem'))
-};
+// const sslOptions = {
+//   key: fs.readFileSync(path.join(__dirname, 'ssl', 'key.pem')),
+//   cert: fs.readFileSync(path.join(__dirname, 'ssl', 'crt.pem')),
+//   ca: fs.readFileSync(path.join(__dirname, 'ssl', 'chain.pem'))
+// };
 
 //sha256
 const crypto = require('crypto');
@@ -40,6 +43,33 @@ function sha256(password) {
 const VI_API_URL = process.env.VI_API_URL || 'https://backoffice.voipinnovations.com/Services/APIService.asmx'; // SOAP endpoint
 const VI_API_USERNAME = process.env.VI_API_USERNAME;
 const VI_API_PASSWORD = process.env.VI_API_PASSWORD;
+
+// Helper function to format phone numbers
+function formatPhoneNumber(phoneNumber) {
+  // Handle null or undefined input
+  if (!phoneNumber) return '';
+  
+  // Convert to string if it's not already
+  const phoneStr = phoneNumber.toString();
+  
+  // Remove any non-digit characters
+  const digitsOnly = phoneStr.replace(/\D/g, '');
+
+  // Ensure it has 10 digits (US numbers)
+  if (digitsOnly.length === 10) {
+    return digitsOnly;
+  }
+
+  // If it already has country code (11 digits for US)
+  if (digitsOnly.length === 11 && digitsOnly.startsWith('1')) {
+    return digitsOnly.substring(1); // Remove the '1' country code
+  }
+
+  return phoneStr; // Return as-is if format is unclear
+}
+
+
+
 
 
 //csrf if needed
@@ -107,7 +137,7 @@ app.post('/api/v1/tokengen', (req, res) => {
 });
     
 //test protected
-app.get('/api/v1/protected',authenticateToken, (req, res) => {
+app.get('/v1/protected',authenticateToken, (req, res) => {
     res.json({ message: `Welcome, Jane` });
 });
 
@@ -374,10 +404,37 @@ function createSoapEnvelope(login, secret, sender, recipient, message) {
 </soap12:Envelope>`;
 }
 
-// Updated Send SMS endpoint using SOAP 1.2
+// Helper function to create a SOAP 1.1 envelope instead of 1.2
+function createSoap11Envelope(login, secret, sender, recipient, message) {
+  // Escape special characters in XML
+  const escapeXml = (unsafe) => {
+    if (!unsafe) return '';
+    return unsafe.toString()
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  };
+  
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <SendSMS xmlns="http://tempuri.org/">
+      <login>${escapeXml(login)}</login>
+      <secret>${escapeXml(secret)}</secret>
+      <sender>${escapeXml(sender)}</sender>
+      <recipient>${escapeXml(recipient)}</recipient>
+      <message>${escapeXml(message)}</message>
+    </SendSMS>
+  </soap:Body>
+</soap:Envelope>`;
+}
+
+// Updated Send SMS endpoint using SOAP 1.1
 app.post('/api/VI/V1/send', authenticateToken, async (req, res) => {
   try {
-    console.log('VI SMS send request received');
+    console.log('VI SMS send request received (SOAP 1.1)');
     
     const { from, to, message } = req.body;
     
@@ -393,8 +450,8 @@ app.post('/api/VI/V1/send', authenticateToken, async (req, res) => {
     const formattedFrom = formatPhoneNumber(from);
     const formattedTo = formatPhoneNumber(to);
     
-    // Create SOAP 1.2 envelope
-    const soapEnvelope = createSoapEnvelope(
+    // Create SOAP 1.1 envelope
+    const soapEnvelope = createSoap11Envelope(
       VI_API_USERNAME,
       VI_API_PASSWORD,
       formattedFrom,
@@ -402,13 +459,14 @@ app.post('/api/VI/V1/send', authenticateToken, async (req, res) => {
       message
     );
     
-    console.log('Sending SOAP request to:', VI_API_URL);
+    console.log('Sending SOAP 1.1 request to:', VI_API_URL);
     console.log('SOAP Envelope:', soapEnvelope);
     
-    // Make SOAP request using axios
+    // Make SOAP request using axios - note the changed headers for SOAP 1.1
     const response = await axios.post(VI_API_URL, soapEnvelope, {
       headers: {
-        'Content-Type': 'application/soap+xml; charset=utf-8',
+        'Content-Type': 'text/xml; charset=utf-8',
+        'SOAPAction': 'http://tempuri.org/SendSMS',
         'Content-Length': Buffer.byteLength(soapEnvelope)
       }
     });
@@ -424,12 +482,11 @@ app.post('/api/VI/V1/send', authenticateToken, async (req, res) => {
     const parsedResponse = await parseXml(xmlResponse);
     console.log('Parsed SOAP Response:', JSON.stringify(parsedResponse, null, 2));
     
-    // Extract response details
+    // Extract response details - path is different for SOAP 1.1
     let responseCode, responseMessage, msgDetails;
     
     try {
-      // Navigate through the parsed XML to find the relevant data
-      // This path might need adjustment based on actual response structure
+      // Path for SOAP 1.1 response might be slightly different
       responseCode = parsedResponse.Envelope.Body.SendSMSResponse.SendSMSResult.responseCode;
       responseMessage = parsedResponse.Envelope.Body.SendSMSResponse.SendSMSResult.responseMessage;
       msgDetails = parsedResponse.Envelope.Body.SendSMSResponse.SendSMSResult.MsgDetails;
@@ -495,11 +552,10 @@ app.post('/api/VI/V1/send', authenticateToken, async (req, res) => {
   }
 });
 
-// Alternative SendSMS implementation using strong-soap library
-// This can be used instead of the axios implementation above
+// Alternative SOAP 1.1 implementation using strong-soap
 app.post('/api/VI/V1/send-alt', authenticateToken, async (req, res) => {
   try {
-    console.log('VI SMS send request received (using soap library)');
+    console.log('VI SMS send request received (using soap library for SOAP 1.1)');
     
     const { from, to, message } = req.body;
     
@@ -519,8 +575,16 @@ app.post('/api/VI/V1/send-alt', authenticateToken, async (req, res) => {
     const wsdlUrl = `${VI_API_URL}?WSDL`;
     console.log('Using WSDL URL:', wsdlUrl);
     
-    // Create SOAP client
-    soap.createClient(wsdlUrl, {}, function(err, client) {
+    // Create SOAP client with SOAP 1.1 options
+    const options = {
+      disableCache: true,
+      forceSoap12: false, // Force SOAP 1.1
+      wsdl_options: {
+        timeout: 10000
+      }
+    };
+    
+    soap.createClient(wsdlUrl, options, function(err, client) {
       if (err) {
         console.error('Error creating SOAP client:', err);
         return res.status(500).json({
@@ -531,6 +595,14 @@ app.post('/api/VI/V1/send-alt', authenticateToken, async (req, res) => {
       }
       
       console.log('SOAP client created successfully');
+      
+      // For SOAP 1.1, we need to set the SOAPAction
+      client.setSecurity(new soap.BasicAuthSecurity(VI_API_USERNAME, VI_API_PASSWORD));
+      
+      // Set SOAP 1.1 headers if needed
+      if (client.lastRequest) {
+        console.log('Last SOAP Request:', client.lastRequest);
+      }
       
       // Prepare parameters for SendSMS operation
       const params = {
@@ -547,6 +619,15 @@ app.post('/api/VI/V1/send-alt', authenticateToken, async (req, res) => {
       client.SendSMS(params, function(err, result) {
         if (err) {
           console.error('SOAP call error:', err);
+          
+          // Try to log the last request/response for debugging
+          if (client.lastRequest) {
+            console.log('Last SOAP Request:', client.lastRequest);
+          }
+          if (client.lastResponse) {
+            console.log('Last SOAP Response:', client.lastResponse);
+          }
+          
           return res.status(500).json({
             success: false,
             error: 'SOAP call failed',
@@ -591,27 +672,209 @@ app.post('/api/VI/V1/send-alt', authenticateToken, async (req, res) => {
   }
 });
 
-// Helper function to format phone numbers
-function formatPhoneNumber(phoneNumber) {
-  // Remove any non-digit characters
-  const digitsOnly = phoneNumber.replace(/\D/g, '');
-
-  // Ensure it has 10 digits (US numbers)
-  if (digitsOnly.length === 10) {
-    return digitsOnly;
+// New VoIP Innovations REST API endpoint
+app.post('/api/VI/V2/send', authenticateToken, async (req, res) => {
+  try {
+    console.log('VI SMS send request received (using new REST API)');
+    
+    const { from, to, message } = req.body;
+    
+    // Validate input
+    if (!from || !to || !message) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'From number, to number, and message are required' 
+      });
+    }
+    
+    // Format phone numbers to include country code (API requires it)
+    const formatWithCountryCode = (number) => {
+      const digitsOnly = number.toString().replace(/\D/g, '');
+      // Ensure number has country code (add US code '1' if 10 digits)
+      return digitsOnly.length === 10 ? '1' + digitsOnly : digitsOnly;
+    };
+    
+    const formattedFrom = formatWithCountryCode(from);
+    const formattedTo = formatWithCountryCode(to);
+    
+    // Create Basic Auth token
+    const authToken = Buffer.from(`${process.env.VI_API_USERNAME}:${process.env.VI_API_PASSWORD}`).toString('base64');
+    
+    // Prepare request data based on their documentation
+    const requestData = {
+      to: formattedTo,
+      from: formattedFrom,
+      messageType: 'SMS',
+      text: message,
+      // Optional - uncomment if you want delivery receipts
+      // dlr: true
+    };
+    
+    console.log('Sending REST API request to: https://mysmsforward.com/sms/out/');
+    console.log('Request data:', requestData);
+    
+    // Make REST API request
+    const response = await axios({
+      method: 'post',
+      url: 'https://mysmsforward.com/sms/out/',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Basic ${authToken}`
+      },
+      data: requestData
+    });
+    
+    console.log('Got response with status:', response.status);
+    console.log('Response data:', response.data);
+    
+    // Process the response
+    const responseData = response.data;
+    
+    // Check for API errors
+    if (responseData.status !== 'OK') {
+      return res.status(400).json({
+        success: false,
+        error: responseData.data || 'Failed to send SMS',
+        code: responseData.code
+      });
+    }
+    
+    // Return success response
+    res.status(200).json({
+      success: true,
+      message: 'SMS sent successfully',
+      details: {
+        uuid: responseData.uuid,
+        status: responseData.status,
+        code: responseData.code,
+        remoteIds: responseData.remote_ids
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error sending SMS via REST API:', error);
+    
+    let errorMessage = 'Failed to send SMS';
+    let errorDetails = {};
+    
+    if (error.response) {
+      console.error('API Error Response:', error.response.data);
+      errorMessage = 'API Error';
+      errorDetails = {
+        status: error.response.status,
+        data: error.response.data
+      };
+    } else if (error.request) {
+      console.error('No response received from API');
+      errorMessage = 'No response from API';
+      errorDetails = {
+        request: error.request.method + ' ' + error.request.path
+      };
+    } else {
+      console.error('Request error:', error.message);
+      errorMessage = error.message;
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: errorMessage,
+      details: errorDetails
+    });
   }
+});
 
-  // If it already has country code (11 digits for US)
-  if (digitsOnly.length === 11 && digitsOnly.startsWith('1')) {
-    return digitsOnly.substring(1); // Remove the '1' country code
+// Webhook endpoint for receiving SMS from the new VoIP Innovations API
+app.post('/api/VI/V2', (req, res) => {
+  try {
+    // Log complete request details for maximum visibility
+    console.log('==== INCOMING VI REST API WEBHOOK ====');
+    console.log('Headers:', req.headers);
+    console.log('Query Parameters:', req.query);
+    console.log('Body (raw):', req.body);
+    console.log('Body (stringified):', JSON.stringify(req.body, null, 2));
+    console.log('URL:', req.originalUrl);
+    console.log('Method:', req.method);
+    console.log('IP Address:', req.ip);
+    console.log('Content-Type:', req.headers['content-type']);
+    
+    // Log raw request data in case it's not properly parsed
+    if (req.rawBody) {
+      console.log('Raw Body:', req.rawBody);
+    }
+    
+    // Create a complete log record for debugging
+    const logRecord = {
+      timestamp: new Date().toISOString(),
+      headers: req.headers,
+      query: req.query,
+      body: req.body,
+      url: req.originalUrl,
+      method: req.method,
+      ip: req.ip
+    };
+    
+    // Write to a log file for persistent storage
+    try {
+      fs.appendFileSync(
+        path.join(__dirname, 'vi_rest_webhook_logs.json'), 
+        JSON.stringify(logRecord) + '\n',
+        'utf8'
+      );
+    } catch (logError) {
+      console.error('Error writing to log file:', logError);
+    }
+    
+    // Extract the SMS data from the request body
+    // Based on documentation, we should expect messageType, text, etc.
+    const { 
+      messageType = 'UNKNOWN',
+      text = '',
+      to = '',
+      from = ''
+    } = req.body;
+    
+    // Log the received message
+    console.log(`Received ${messageType}: From ${from} to ${to}: "${text}"`);
+    
+    // Process the incoming message
+    if (messageType === 'SMS') {
+      processInboundSMS(from, to, text);
+    } else if (messageType === 'MMS') {
+      // Handle MMS - log it for now
+      console.log('Received MMS message with possible attachments');
+      
+      // Check for files or fileUrls
+      if (req.body.files) {
+        console.log('MMS contains files:', Object.keys(req.body.files).length);
+      }
+      if (req.body.fileUrls) {
+        console.log('MMS contains file URLs:', req.body.fileUrls);
+      }
+      
+      // Process as SMS for now (just using the text component)
+      processInboundSMS(from, to, text);
+    }
+    
+    // Respond with success - this is important to acknowledge receipt
+    res.status(200).json({
+      success: true,
+      message: 'Message received and processed'
+    });
+    
+  } catch (error) {
+    console.error('Error processing incoming webhook:', error);
+    
+    // Always return 200 to prevent retries
+    res.status(200).json({
+      success: false,
+      error: 'Failed to process the message, but received it'
+    });
   }
+});
 
-  return phoneNumber; // Return as-is if format is unclear
-}
-
-// Raw body parser middleware for better debugging
+// Helper function to handle webhook payloads from different sources
 app.use((req, res, next) => {
-  if (req.originalUrl === '/api/VI/V1') {
+  if (req.originalUrl === '/api/VI/V1' || req.originalUrl === '/api/VI/V2') {
     let data = '';
     req.on('data', chunk => {
       data += chunk;
@@ -626,9 +889,21 @@ app.use((req, res, next) => {
   }
 });
 
-const httpsServer = https.createServer(sslOptions, app);
-const HTTPS_PORT = process.env.HTTPS_PORT || 443;
+// Add this immediately before the httpsServer creation line
 
-httpsServer.listen(HTTPS_PORT, () => {
-  console.log(`HTTPS server running on port ${HTTPS_PORT}`);
+
+
+
+
+
+// const httpsServer = https.createServer(sslOptions, app);
+// const HTTPS_PORT = process.env.HTTPS_PORT || 8081;
+
+// httpsServer.listen(HTTPS_PORT, () => {
+//   console.log(`HTTPS server running on port ${HTTPS_PORT}`);
+// });
+
+const HTTP_PORT = process.env.HTTP_PORT || 3000;
+app.listen(HTTP_PORT, '127.0.0.1', () => {
+  console.log('API server running on port 3000');
 });
