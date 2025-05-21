@@ -209,4 +209,4 @@ Please refer to the project's contribution guidelines (if available).
 
 ## License
 
-This project is licensed under the [Specify License Type, e.g., MIT License](LICENSE_FILE_NAME).
+This project is licensed under the [MIT License](LICENSE).
