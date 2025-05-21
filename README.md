@@ -27,6 +27,7 @@ This project is a Node.js Express application that acts as an API gateway for se
 ├── .env.example        # Example environment variables
 ├── package.json        # Project dependencies and scripts
 └── README.md           # This file
+
 ```
 
 ## Prerequisites
